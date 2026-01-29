@@ -497,6 +497,53 @@ app.get('/api/info', (req, res) => {
   });
 });
 
+// Debug endpoint to check schedule data
+app.get('/api/debug_schedule', async (req, res) => {
+  try {
+    const operatorId = req.query.operatorId || DEFAULT_OPERATOR_ID;
+    
+    console.log('🔍 Checking schedule data for operator:', operatorId);
+    
+    // Load schedule
+    const schedule = await scheduleLoader.loadSchedule(operatorId);
+    
+    // Check what files exist
+    const fs = await import('fs/promises');
+    const path = await import('path');
+    
+    const schedulePath = path.join(process.cwd(), 'schedules', `operator_${operatorId}`);
+    
+    let filesExist = false;
+    let fileList = [];
+    
+    try {
+      const files = await fs.readdir(schedulePath);
+      fileList = files;
+      filesExist = files.length > 0;
+    } catch (error) {
+      filesExist = false;
+    }
+    
+    res.json({
+      operatorId,
+      scheduleLoaded: !!schedule,
+      isFallback: schedule?.isFallback || false,
+      schedulePath,
+      filesExist,
+      files: fileList,
+      stopsCount: schedule?.stops ? Object.keys(schedule.stops).length : 0,
+      sampleStops: schedule?.stops ? Object.entries(schedule.stops).slice(0, 5) : [],
+      tripsCount: schedule?.trips?.length || 0,
+      sampleTrips: schedule?.trips?.slice(0, 3) || [],
+      stopTimesCount: schedule?.stop_times?.length || 0,
+      loadedAt: schedule?.loadedAt
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message, stack: error.stack });
+  }
+});
+
 // ====== VIRTUAL BUS ENDPOINTS ======
 
 // 1. All virtual buses (all scheduled trips as virtual)
