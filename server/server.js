@@ -724,6 +724,131 @@ app.get('/api/debug/virtuals-detail', async (req, res) => {
     res.status(500).json({ error: 'Debug failed', details: err.message });
   }
 });
+function setToArray(value) {
+  if (!value) return [];
+  if (value instanceof Set) return [...value];
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'object') return Object.keys(value);
+  return [];
+}
+
+function firstTripDeparture(stopTimes = []) {
+  let best = null;
+  for (const st of stopTimes) {
+    const seq = Number(st.stop_sequence);
+    const time = st.departure_time || st.arrival_time || '';
+    if (!time) continue;
+    if (!best || (Number.isFinite(seq) && seq < best.seq)) {
+      best = { seq: Number.isFinite(seq) ? seq : 9999, time };
+    }
+  }
+  return best ? best.time : '';
+}
+
+function buildGtfsBundleFromSchedule(schedule) {
+  const tripsMap = schedule?.tripsMap || {};
+  const stopsSrc = schedule?.stops || {};
+  const stopTimesByTrip = schedule?.stopTimesByTrip || {};
+  const calendarDates = schedule?.calendarDates || {};
+
+  const stops = {};
+  Object.entries(stopsSrc).forEach(([id, stop]) => {
+    const lat = Number(stop?.lat);
+    const lng = Number(stop?.lng != null ? stop.lng : stop?.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    stops[String(id)] = {
+      name: stop?.name || ('Stop ' + id),
+      lat,
+      lng
+    };
+  });
+
+  const map = {};
+  const blocks = {};
+  Object.values(tripsMap).forEach((trip) => {
+    const tripId = trip?.trip_id || trip?.tripId;
+    const routeId = trip?.route_id || trip?.routeId;
+    const blockId = String(trip?.block_id || trip?.blockId || '').trim();
+    const stopTimes = (tripId && stopTimesByTrip[tripId]) || [];
+
+    stopTimes.forEach((st) => {
+      const stopId = String(st.stop_id || st.stopId || '').trim();
+      if (!stopId || !routeId) return;
+      if (!map[stopId]) map[stopId] = [];
+      if (!map[stopId].includes(routeId)) map[stopId].push(routeId);
+    });
+
+    if (!blockId) return;
+    if (!blocks[blockId]) blocks[blockId] = [];
+    blocks[blockId].push({
+      tripId: tripId || '',
+      routeId: routeId || '',
+      serviceId: trip?.service_id || trip?.serviceId || '',
+      headsign: trip?.trip_headsign || trip?.tripHeadsign || 'Unknown destination',
+      directionId: trip?.direction_id === '' || trip?.direction_id == null
+        ? null
+        : Number(trip.direction_id),
+      startTime: firstTripDeparture(stopTimes)
+    });
+  });
+
+  Object.keys(map).forEach((stopId) => map[stopId].sort());
+  Object.keys(blocks).forEach((blockId) => {
+    blocks[blockId].sort((a, b) => String(a.startTime).localeCompare(String(b.startTime)));
+  });
+
+  const servicesByDate = {};
+  Object.entries(calendarDates).forEach(([serviceId, entry]) => {
+    const added = setToArray(entry?.added || entry?.allDates || entry);
+    added.forEach((date) => {
+      if (!date) return;
+      if (!servicesByDate[date]) servicesByDate[date] = [];
+      if (!servicesByDate[date].includes(serviceId)) servicesByDate[date].push(serviceId);
+    });
+  });
+
+  return {
+    fetchedAt: new Date().toISOString(),
+    source: 'scheduleLoader',
+    map,
+    stops,
+    blocks,
+    servicesByDate
+  };
+}
+
+const GTFS_ZIP_URL = 'https://bct.tmix.se/Tmix.Cap.TdExport.WebApi/gtfs/?operatorIds=36';
+
+app.get('/api/gtfs-bundle', async (req, res) => {
+  try {
+    await ensureScheduleLoaded();
+    const bundle = buildGtfsBundleFromSchedule(scheduleLoader.scheduleData);
+    res.set('Cache-Control', 'public, max-age=300');
+    res.json(bundle);
+  } catch (err) {
+    console.error('[GTFS-BUNDLE]', err);
+    res.status(500).json({ error: 'Failed to build GTFS bundle', details: err.message });
+  }
+});
+
+app.get('/api/gtfs-zip', async (req, res) => {
+  try {
+    const upstream = await fetch(GTFS_ZIP_URL);
+    if (!upstream.ok) {
+      return res.status(upstream.status).send('Upstream GTFS zip failed');
+    }
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    res.set({
+      'Content-Type': 'application/zip',
+      'Cache-Control': 'public, max-age=300',
+      'Access-Control-Allow-Origin': '*'
+    });
+    res.send(buffer);
+  } catch (err) {
+    console.error('[GTFS-ZIP]', err);
+    res.status(502).json({ error: 'Failed to proxy GTFS zip', details: err.message });
+  }
+});
 
 // Health check
 app.get('/api/health', (req, res) => {
